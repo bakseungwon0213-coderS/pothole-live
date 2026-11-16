@@ -1,0 +1,745 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>노면 이상 진동 감지 · 킥보드 포트홀 신고 지원</title>
+<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css">
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+<style>
+  :root { --bg:#111; --card:#1e1e1e; --line:#333; --txt:#eee; --sub:#aaa; }
+  * { box-sizing: border-box; }
+  body { font-family: -apple-system, "Apple SD Gothic Neo", "Malgun Gothic", sans-serif; margin: 0; padding: 14px;
+         background: var(--bg); color: var(--txt); max-width: 760px; margin-inline: auto; }
+  h1 { font-size: 1.15rem; margin: 4px 0 2px; }
+  h2 { font-size: 1rem; margin: 18px 0 8px; }
+  .sub { color: var(--sub); font-size: 0.85rem; }
+  button { font-size: 1rem; padding: 13px; border: 0; border-radius: 10px; color: #fff; cursor: pointer; }
+  button:disabled { opacity: .4; }
+  .row { display: flex; gap: 8px; margin: 8px 0; }
+  .row > * { flex: 1; }
+  .green { background:#2e7d32 } .purple { background:#6a1b9a } .red { background:#c62828 } .blue { background:#1565c0 } .gray { background:#444 }
+  .card { background: var(--card); border-radius: 10px; padding: 10px; margin: 8px 0; }
+  .grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; }
+  .stat { background: var(--card); border-radius: 10px; padding: 8px; text-align: center; }
+  .stat b { display: block; font-size: 1.5rem; }
+  .warn { color: #ff8a80; }
+  canvas { width: 100%; background: #000; border-radius: 8px; display: block; }
+  #map { height: 340px; border-radius: 10px; }
+  .ev { border-left: 6px solid #888; cursor: pointer; }
+  .ev.sel { outline: 2px solid #fff; }
+  .chip { display:inline-block; padding:2px 8px; border-radius: 10px; font-size: .8rem; color:#000; font-weight:bold; }
+  .checks { font-size: .82rem; color: #ccc; margin-top: 6px; line-height: 1.5; }
+  .ask button { padding: 10px; }
+  .answered { color: #9ccc65; font-weight: bold; }
+  textarea { width: 100%; height: 200px; background:#000; color:#ddd; border-radius:8px; padding:8px; font-size:.8rem; }
+  details { background: var(--card); border-radius: 10px; padding: 10px; margin: 8px 0; }
+  label { display:flex; justify-content: space-between; align-items:center; margin: 6px 0; font-size: .9rem; }
+  input, select { width: 110px; padding: 6px; border-radius: 6px; border: 0; }
+  .hidden { display: none; }
+  .legend span { margin-right: 10px; font-size: .85rem; }
+</style>
+</head>
+<body>
+
+<h1>🛴 노면 이상 진동 감지</h1>
+<div class="sub">1차 FFT → 2차 자이로 → 심각도 → 하차 후 3차 확인 → 신고서</div>
+
+<!-- ========== 시작 화면 ========== -->
+<section id="startView">
+  <div class="row">
+    <button id="realBtn" class="green">실제 측정 시작</button>
+    <button id="simBtn" class="purple">시뮬레이션 (데모)</button>
+  </div>
+  <div class="card sub">
+    · <b>실제 측정</b>: 폰을 킥보드 핸들에 거치하고 시작 → 2초간 움직이지 말기(보정) → 주행 → 하차 후 종료<br>
+    · <b>시뮬레이션</b>: 폰 없이 미리 만든 주행 데이터(방지턱·거친길·경미/위험 포트홀)로 같은 분석을 실행<br>
+    · 주행 중에는 화면을 보지 마세요. 결과는 하차 후에 확인해요.
+  </div>
+  <details>
+    <summary>설정 (측정 데이터로 정한 기준값)</summary>
+    <label>축간거리 [m] <input id="cfgWheel" type="number" step="0.01"></label>
+    <label>피치 부호 (앞으로 숙일 때 −가 되게) <select id="cfgSign"><option value="1">+1</option><option value="-1">−1</option></select></label>
+    <label>피치 축 <select id="cfgAxis"><option value="0">x (beta)</option><option value="1">y (gamma)</option><option value="2">z (alpha)</option></select></label>
+    <label>충격 후보 RMS 기준 [m/s²] <input id="cfgTrig" type="number" step="0.1"></label>
+    <label>1차: 배경 대비 배수 <input id="cfgContrast" type="number" step="0.5"></label>
+    <label>2차: 최소 피치 각속도 [°/s] <input id="cfgPitch" type="number" step="1"></label>
+    <label>위험 포트홀 충격 기준 [m/s²] <input id="cfgDanger" type="number" step="0.5"></label>
+    <label>시뮬레이션 재생 속도 <select id="simSpeed"><option value="1">1배</option><option value="3" selected>3배</option><option value="10">10배</option></select></label>
+  </details>
+</section>
+
+<!-- ========== 측정 중 화면 ========== -->
+<section id="liveView" class="hidden">
+  <div id="liveMsg" class="card">준비 중…</div>
+  <div class="grid">
+    <div class="stat">경과<b id="sTime">0</b>초</div>
+    <div class="stat">샘플링<b id="sHz">-</b>Hz</div>
+    <div class="stat">GPS 오차<b id="sGps">-</b>m</div>
+    <div class="stat">충격 후보<b id="sCand">0</b></div>
+    <div class="stat">1차 통과<b id="sPass">0</b></div>
+    <div class="stat">방지턱 제외<b id="sBump">0</b></div>
+    <div class="stat" style="color:#ffb300">경미 포트홀<b id="sMinor">0</b></div>
+    <div class="stat" style="color:#ef5350">위험 포트홀<b id="sDanger">0</b></div>
+    <div class="stat">걸러짐<b id="sRemoved">0</b></div>
+  </div>
+  <div class="card sub">최근 5초 수직 가속도 (세로선 = 판정된 충격)</div>
+  <canvas id="livePlot" width="700" height="160"></canvas>
+  <div class="row"><button id="stopBtn" class="red">측정 종료 (하차 후)</button></div>
+</section>
+
+<!-- ========== 결과 화면 ========== -->
+<section id="resultView" class="hidden">
+  <h2>① 주행 결과 지도</h2>
+  <div class="legend"><span style="color:#e53935">● 위험 포트홀</span><span style="color:#ffb300">● 경미 포트홀(관찰)</span><span style="color:#42a5f5">● 방지턱(제외)</span></div>
+  <div id="map"></div>
+
+  <h2>② 3차 확인 · 위험 포트홀</h2>
+  <div id="askList"></div>
+
+  <h2>③ 감지 기록 (눌러서 판정 근거 보기)</h2>
+  <div id="evList"></div>
+  <div id="detail" class="card hidden">
+    <div id="detailTitle"></div>
+    <div class="sub">FFT 파워 스펙트럼 (점선 = 충격 대역 시작)</div>
+    <canvas id="specPlot" width="700" height="170"></canvas>
+    <div class="sub">피치 각속도 [°/s] (0초 = 충격 후보 시각)</div>
+    <canvas id="pitchPlot" width="700" height="150"></canvas>
+    <div id="detailChecks" class="checks"></div>
+  </div>
+
+  <h2>④ 신고서</h2>
+  <div class="row">
+    <button id="reportBtn" class="blue">신고서 만들기</button>
+    <button id="rawBtn" class="gray">원본 데이터 CSV 저장</button>
+  </div>
+  <div id="reportBox" class="hidden">
+    <textarea id="reportText" readonly></textarea>
+    <div class="row"><button id="copyBtn" class="gray">복사</button><button id="csvBtn" class="gray">신고 목록 CSV</button></div>
+    <div class="row"><button id="sendBtn" class="red">지자체에 신고하기 (시연)</button></div>
+    <div id="sendResult" class="card hidden"></div>
+    <div class="sub">※ 지자체 전송은 시나리오: 신고서를 받은 지자체가 AI 카메라 차량으로 확인 → 보수</div>
+  </div>
+  <div class="row"><button id="againBtn" class="green">처음으로</button></div>
+</section>
+
+<script>
+// =====================================================================
+//  노면 이상 진동 분석 엔진  (화면과 분리된 순수 계산 부분)
+//  흐름: 보정 → 충격 후보(이동 RMS) → 1차 FFT → 2차 자이로 → 심각도 → GPS 위치
+// =====================================================================
+
+// ★★★ 판정 기준값: 지금은 가정값. Phyphox 4종 노면 측정 결과로 바꿀 곳 ★★★
+const CONFIG = {
+  calibSec: 2.0,        // 시작 후 이 시간 동안 정지 → 중력 방향 측정 (수직축 자동 결정)
+  rmsWinSec: 0.1,       // 이동 RMS 창 길이 [s]
+  triggerRms: 2.0,      // 수직 가속도 이동 RMS가 이 값[m/s²]을 넘으면 '충격 후보'
+  preSec: 0.3,          // 분석 창: 후보 시각 이전
+  postSec: 1.2,         // 분석 창: 후보 시각 이후 (뒷바퀴 충격까지 포함되게)
+  bgSec: 1.0,           // 배경(평소 주행) 창 길이
+  // --- 1차: FFT ---
+  impactBandHz: 3,      // 이 주파수 이상 = 노면 충격 대역, 미만 = 사람 움직임
+  minBandRatio: 0.6,    // 충격 대역 에너지 비율이 이 값 이상
+  minContrast: 4,       // 충격 대역 파워가 직전 배경의 몇 배 이상
+  // --- 2차: 자이로 ---
+  pitchAxis: 0,         // 피치(앞뒤 기울기) 축: 0=x, 1=y, 2=z  (축 방향 확인 실험으로 결정)
+  pitchSign: 1,         // 앞으로 숙일 때 값이 −가 되도록 맞추는 부호 (+1 또는 −1)
+  minPitchRate: 15,     // 피치 각속도가 이 값[°/s] 이상이어야 '회전 있음'
+  wheelbase: 0.9,       // 축간거리 [m] (지쿠터 실측 필요)
+  // --- 심각도 ---
+  dangerPeakAcc: 9,     // 최대 수직 충격[m/s²]이 이 값 이상이면 '위험 포트홀'
+};
+
+const TYPE_INFO = {
+  normal:  { name: "일반길",       color: "#9e9e9e" },
+  unclear: { name: "판정 보류",    color: "#bdbdbd" },
+  bump:    { name: "과속방지턱",   color: "#42a5f5" },
+  minor:   { name: "경미 포트홀",  color: "#ffb300" },
+  danger:  { name: "위험 포트홀",  color: "#e53935" },
+};
+
+// ---------------- FFT (직접 구현, 반복형 radix-2) ----------------
+function fft(re, im) {
+  const n = re.length;
+  for (let i = 1, j = 0; i < n; i++) {            // 비트 반전 순서로 재배열
+    let bit = n >> 1;
+    for (; j & bit; bit >>= 1) j ^= bit;
+    j ^= bit;
+    if (i < j) { [re[i], re[j]] = [re[j], re[i]]; [im[i], im[j]] = [im[j], im[i]]; }
+  }
+  for (let len = 2; len <= n; len <<= 1) {        // 나비(butterfly) 연산
+    const ang = -2 * Math.PI / len, wr = Math.cos(ang), wi = Math.sin(ang);
+    for (let i = 0; i < n; i += len) {
+      let cr = 1, ci = 0;
+      for (let k = 0; k < len / 2; k++) {
+        const a = i + k, b = a + len / 2;
+        const vr = re[b] * cr - im[b] * ci, vi = re[b] * ci + im[b] * cr;
+        re[b] = re[a] - vr; im[b] = im[a] - vi;
+        re[a] += vr;        im[a] += vi;
+        const t = cr * wr - ci * wi; ci = cr * wi + ci * wr; cr = t;
+      }
+    }
+  }
+}
+function ifft(re, im) {
+  for (let i = 0; i < im.length; i++) im[i] = -im[i];
+  fft(re, im);
+  const n = re.length;
+  for (let i = 0; i < n; i++) { re[i] /= n; im[i] = -im[i] / n; }
+}
+const nextPow2 = (n) => { let p = 1; while (p < n) p <<= 1; return p; };
+
+// 평균 제거 → Hann 창 → 0 채우기 → FFT → 파워 스펙트럼
+function spectrum(x, fs, minN = 64) {
+  const n = x.length, N = nextPow2(Math.max(n, minN));
+  const mean = x.reduce((s, v) => s + v, 0) / n;
+  const re = new Float64Array(N), im = new Float64Array(N);
+  let w2 = 0;
+  for (let i = 0; i < n; i++) {
+    const w = 0.5 - 0.5 * Math.cos(2 * Math.PI * i / (n - 1));
+    re[i] = (x[i] - mean) * w; w2 += w * w;
+  }
+  fft(re, im);
+  const half = N / 2, f = [], P = [];
+  for (let k = 0; k <= half; k++) { f.push(k * fs / N); P.push(re[k] * re[k] + im[k] * im[k]); }
+  return { f, P, N, norm: N * w2 };               // norm: 길이가 달라도 파워를 비교하기 위한 정규화값
+}
+function bandPower(sp, fLo) {
+  let s = 0;
+  for (let k = 0; k < sp.f.length; k++) if (sp.f[k] >= fLo) s += sp.P[k];
+  return s / sp.norm;
+}
+
+// 켑스트럼: FFT → log|X| → 역FFT → '메아리'(앞·뒷바퀴 이중 충격) 시간차 찾기
+function cepstrumEcho(x, fs, qMin, qMax) {
+  const N = nextPow2(Math.max(x.length, 128));
+  const mean = x.reduce((s, v) => s + v, 0) / x.length;
+  const re = new Float64Array(N), im = new Float64Array(N);
+  x.forEach((v, i) => re[i] = v - mean);
+  fft(re, im);
+  for (let k = 0; k < N; k++) { re[k] = Math.log(Math.hypot(re[k], im[k]) + 1e-9); im[k] = 0; }
+  ifft(re, im);
+  let best = -Infinity, bestQ = null;
+  const q0 = Math.max(1, Math.round(qMin * fs)), q1 = Math.min(N / 2 - 1, Math.round(qMax * fs));
+  for (let q = q0; q <= q1; q++) if (re[q] > best) { best = re[q]; bestQ = q; }
+  return bestQ === null ? null : { dt: bestQ / fs, strength: best };
+}
+
+// ---------------- 실시간 탐지기 ----------------
+class Detector {
+  constructor(cfg, onEvent) {
+    this.cfg = { ...cfg };
+    this.onEvent = onEvent || (() => {});
+    this.t = []; this.av = []; this.pitch = [];
+    this.gps = [];                 // [t, lat, lon, acc, speed]
+    this.calib = []; this.g = null;
+    this.pending = null; this.deadUntil = 0;
+    this.events = [];
+    this.stats = { candidates: 0, pass1: 0, bump: 0, minor: 0, danger: 0, removed: 0 };
+    this.lastRms = 0;
+  }
+  get calibrated() { return this.g !== null; }
+
+  fsEstimate() {
+    const n = this.t.length;
+    return n > 10 ? (n - 1) / (this.t[n - 1] - this.t[0]) : 60;
+  }
+
+  addGps(t, lat, lon, acc, speed) { this.gps.push([t, lat, lon, acc, speed]); }
+
+  // lin: 중력 뺀 가속도 [x,y,z] (없으면 null), incG: 중력 포함 가속도, rot: [x,y,z] 회전 속도(°/s)
+  addMotion(t, lin, incG, rot) {
+    const c = this.cfg;
+    if (!this.g) {                                   // ① 보정: 정지 상태에서 중력 방향 측정
+      if (incG && incG[0] != null) this.calib.push(incG);
+      if (t >= c.calibSec && this.calib.length > 5) {
+        const m = [0, 1, 2].map(i => this.calib.reduce((s, v) => s + v[i], 0) / this.calib.length);
+        const mag = Math.hypot(...m);
+        this.g = { vec: m, unit: m.map(v => v / mag) };
+      }
+      return;
+    }
+    const a = (lin && lin[0] != null) ? lin : incG.map((v, i) => v - this.g.vec[i]);
+    const u = this.g.unit;
+    const av = a[0] * u[0] + a[1] * u[1] + a[2] * u[2];          // 수직 방향 가속도
+    const p = ((rot && rot[c.pitchAxis]) || 0) * c.pitchSign;      // 피치 각속도
+    this.t.push(t); this.av.push(av); this.pitch.push(p);
+
+    // 오래된 데이터 정리 (최근 6초만 보관)
+    if (t - this.t[0] > 6.5) {
+      const cut = this.t.findIndex(v => v > t - 6);
+      this.t.splice(0, cut); this.av.splice(0, cut); this.pitch.splice(0, cut);
+    }
+
+    // ② 충격 후보: 이동 RMS
+    const fs = this.fsEstimate();
+    const nw = Math.max(3, Math.round(c.rmsWinSec * fs));
+    const seg = this.av.slice(-nw);
+    this.lastRms = Math.sqrt(seg.reduce((s, v) => s + v * v, 0) / seg.length);
+    if (!this.pending && t >= this.deadUntil && this.lastRms > c.triggerRms) {
+      this.pending = { t };
+      this.stats.candidates++;
+    }
+    // 후보 이후 postSec 만큼 데이터가 모이면 분석
+    if (this.pending && t >= this.pending.t + c.postSec) {
+      const ev = this.analyze(this.pending.t);
+      this.deadUntil = this.pending.t + c.postSec;
+      this.pending = null;
+      this.events.push(ev);
+      this.onEvent(ev);
+    }
+  }
+
+  positionAt(t) {
+    const g = this.gps;
+    if (!g.length) return null;
+    for (let i = 1; i < g.length; i++) {
+      if (g[i][0] >= t) {                            // 앞뒤 GPS 사이 보간
+        const [t0, la0, lo0] = g[i - 1], [t1, la1, lo1] = g[i];
+        const r = t1 > t0 ? Math.min(1, Math.max(0, (t - t0) / (t1 - t0))) : 0;
+        return { lat: la0 + r * (la1 - la0), lon: lo0 + r * (lo1 - lo0), speed: g[i][4] };
+      }
+    }
+    const last = g[g.length - 1];
+    return { lat: last[1], lon: last[2], speed: last[4] };
+  }
+
+  analyze(tc) {
+    const c = this.cfg, fs = this.fsEstimate();
+    const idx = (a, b) => this.t.map((v, i) => (v >= a && v <= b ? i : -1)).filter(i => i >= 0);
+    const wi = idx(tc - c.preSec, tc + c.postSec);
+    const bi = idx(tc - c.preSec - c.bgSec, tc - c.preSec - 1e-9);
+    const tW = wi.map(i => this.t[i] - tc), avW = wi.map(i => this.av[i]), pW0 = wi.map(i => this.pitch[i]);
+    const pos = this.positionAt(tc);
+    const ev = { id: this.events.length + 1, t: tc, fs, tW, avW, lat: pos?.lat ?? null, lon: pos?.lon ?? null,
+                 speed: pos?.speed ?? null, checks: [] };
+
+    // ---------- 1차: FFT ----------
+    const sp = spectrum(avW, fs);
+    const total = bandPower(sp, 0.5), band = bandPower(sp, c.impactBandHz);
+    let kPk = 1; for (let k = 1; k < sp.P.length; k++) if (sp.P[k] > sp.P[kPk]) kPk = k;
+    let num = 0, den = 0; sp.f.forEach((f, k) => { num += f * sp.P[k]; den += sp.P[k]; });
+    let contrast = Infinity;
+    if (bi.length >= 16) {
+      const bg = spectrum(bi.map(i => this.av[i]), fs);
+      contrast = band / (bandPower(bg, c.impactBandHz) + 1e-12);
+    }
+    ev.spec = { f: sp.f, P: sp.P };
+    ev.peakHz = sp.f[kPk];
+    ev.centroidHz = num / (den || 1);
+    ev.bandRatio = band / (total || 1e-12);
+    ev.contrast = contrast;
+    ev.pass1 = ev.bandRatio >= c.minBandRatio && contrast >= c.minContrast;
+    ev.checks.push(`1차 FFT: 피크 ${ev.peakHz.toFixed(1)} Hz, 충격대역(≥${c.impactBandHz} Hz) 비율 ${(ev.bandRatio * 100).toFixed(0)}%, ` +
+                   `배경 대비 ${isFinite(contrast) ? contrast.toFixed(1) + "배" : "-"} → ${ev.pass1 ? "통과" : "탈락"}`);
+    if (!ev.pass1) { ev.type = "normal"; this.stats.removed++; return ev; }
+    this.stats.pass1++;
+
+    // ---------- 2차: 자이로 ----------
+    const base = bi.length ? bi.reduce((s, i) => s + this.pitch[i], 0) / bi.length : 0;
+    const pW = pW0.map(v => v - base);
+    ev.pitchW = pW;
+    const first = pW.findIndex(v => Math.abs(v) >= c.minPitchRate);
+    ev.pitchMax = Math.max(...pW); ev.pitchMin = Math.min(...pW);
+    if (first < 0) {
+      ev.type = "unclear"; this.stats.removed++;
+      ev.checks.push(`2차 자이로: 피치 회전이 ${c.minPitchRate}°/s보다 작음 → 노면 결함 아님(보류)`);
+      return ev;
+    }
+    const s1 = Math.sign(pW[first]);
+    const opp = pW.slice(first).some(v => v * s1 <= -c.minPitchRate * 0.5);   // 반대 방향 회전이 뒤따르는지
+    ev.pitchOrder = s1 < 0 ? "− → +" : "+ → −";
+    // 앞·뒷바퀴 이중 충격 (켑스트럼) - 보조 지표
+    const echo = cepstrumEcho(avW, fs, 0.1, Math.min(1.0, c.postSec));
+    const dtExp = ev.speed && ev.speed > 0.5 ? c.wheelbase / ev.speed : null;
+    ev.echoDt = echo ? echo.dt : null; ev.dtExp = dtExp;
+    ev.echoMatch = echo && dtExp ? Math.abs(echo.dt - dtExp) <= Math.max(0.3 * dtExp, 2 / fs) : null;
+    ev.checks.push(`2차 자이로: 피치 ${ev.pitchOrder}${opp ? "" : " (반대 회전 약함)"}` +
+                   ` · 이중 충격 Δt ${ev.echoDt ? ev.echoDt.toFixed(2) + " s" : "-"}` +
+                   (dtExp ? ` (예상 ${dtExp.toFixed(2)} s, ${ev.echoMatch ? "일치" : "불일치"})` : ""));
+    if (s1 > 0) {
+      ev.type = "bump"; this.stats.bump++;
+      ev.checks.push("→ 먼저 들림(+) = 과속방지턱으로 판단, 신고 대상 제외");
+      return ev;
+    }
+
+    // ---------- 심각도 ----------
+    ev.peakAcc = Math.max(...avW.map(Math.abs));
+    ev.type = ev.peakAcc >= c.dangerPeakAcc ? "danger" : "minor";
+    this.stats[ev.type]++;
+    ev.checks.push(`심각도: 최대 충격 ${ev.peakAcc.toFixed(1)} m/s² (기준 ${c.dangerPeakAcc}) → ${TYPE_INFO[ev.type].name}`);
+    return ev;
+  }
+}
+
+// ---------------- 시뮬레이션 주행 (폰 없이 테스트·시연용) ----------------
+function makeSimRide(fs = 60) {
+  let seed = 7;
+  const rnd = () => { seed = (seed * 16807) % 2147483647; return seed / 2147483647; };
+  const gauss = () => Math.sqrt(-2 * Math.log(rnd() + 1e-12)) * Math.cos(2 * Math.PI * rnd());
+  const v = 4.0, dt = CONFIG.wheelbase / v, T = 72;
+  const events = [
+    { t: 12, type: "bump" }, { t: 32, type: "minor" }, { t: 45, type: "danger" },
+    { t: 55, type: "bump" }, { t: 63, type: "danger" },
+  ];
+  const rough = [20, 26];                         // 거친 일반길 구간
+  const hit = (tt, amp, f, tau) => (tt < 0 ? 0 : amp * Math.exp(-tt / tau) * Math.sin(2 * Math.PI * f * tt));
+  const bell = (tt, amp, w) => amp * Math.exp(-((tt / w) ** 2));
+  const motion = [];
+  for (let i = 0; i < T * fs; i++) {
+    const t = i / fs, moving = t > 3;
+    let av = moving ? 0.4 * gauss() + 0.5 * Math.sin(2 * Math.PI * 1.2 * t) : 0.05 * gauss();
+    let p = moving ? 2 * gauss() + 4 * Math.sin(2 * Math.PI * 0.8 * t) : 0.2 * gauss();
+    if (t >= rough[0] && t <= rough[1]) { av += 1.8 * gauss(); p += 3 * gauss(); }
+    for (const e of events) {
+      const u = t - e.t;
+      if (u < -0.5 || u > 1.5) continue;
+      if (e.type === "bump") {
+        av += hit(u, 6, 6, 0.1) + hit(u - dt, 5, 6, 0.1);
+        p += bell(u - 0.05, 35, 0.08) + bell(u - 0.18, -28, 0.08) + bell(u - dt - 0.05, -20, 0.08);
+      } else {
+        const A = e.type === "danger" ? 18 : 7;
+        av += hit(u, A, 16, 0.05) + hit(u - dt, A * 0.7, 16, 0.05);
+        p += bell(u - 0.03, -A * 2.5, 0.05) + bell(u - 0.10, A * 2, 0.05) + bell(u - dt - 0.03, A * 1.2, 0.05);
+      }
+    }
+    // 폰을 핸들에 세로로 거치 → 중력은 y축 방향, 피치는 x축 회전으로 가정
+    motion.push({ t, lin: [0.2 * gauss(), av, 0.2 * gauss()], incG: [0, 9.81 + av, 0], rot: [p, 0.5 * gauss(), 0.5 * gauss()] });
+  }
+  const gps = [];
+  for (let t = 0; t <= T; t += 1) {
+    const d = Math.max(0, t - 3) * v;               // 이동 거리 [m]
+    const lat = 37.2965 + (d * Math.cos(d / 150)) / 111000;
+    const lon = 126.8340 + (d * Math.sin(d / 150)) / 88700;
+    gps.push({ t, lat, lon, acc: 4, speed: t > 3 ? v : 0 });
+  }
+  return { motion, gps, events, T, fs };
+}
+
+if (typeof module !== "undefined" && typeof window === "undefined") module.exports = { CONFIG, TYPE_INFO, Detector, makeSimRide, spectrum, fft, ifft, cepstrumEcho };
+
+</script>
+<script>
+// =====================================================================
+//  화면 부분: 측정 시작/종료, 실시간 표시, 지도, 3차 확인, 신고서
+// =====================================================================
+const $ = (id) => document.getElementById(id);
+let det = null, mode = null, running = false;
+let t0 = 0, watchId = null, wakeLock = null, simTimer = null;
+let raw = { motion: [], gps: [] };
+let hzCount = 0, hzLast = 0, hzValue = 0, lastGpsAcc = null;
+let map = null, markers = {};
+
+// ---- 설정 화면 값 채우기/읽기 ----
+const cfgFields = { cfgWheel: "wheelbase", cfgSign: "pitchSign", cfgAxis: "pitchAxis", cfgTrig: "triggerRms",
+                    cfgContrast: "minContrast", cfgPitch: "minPitchRate", cfgDanger: "dangerPeakAcc" };
+for (const [id, key] of Object.entries(cfgFields)) $(id).value = CONFIG[key];
+function readConfig() {
+  const c = { ...CONFIG };
+  for (const [id, key] of Object.entries(cfgFields)) c[key] = Number($(id).value);
+  return c;
+}
+function show(view) { ["startView", "liveView", "resultView"].forEach(v => $(v).classList.toggle("hidden", v !== view)); }
+
+// ---- 공통: 측정 준비 ----
+function begin(m) {
+  mode = m; running = true;
+  det = new Detector(readConfig());
+  raw = { motion: [], gps: [] }; hzCount = 0; hzLast = 0; hzValue = 0; lastGpsAcc = null;
+  show("liveView");
+  $("stopBtn").disabled = false;
+  updateLive();
+}
+
+// ---- 실제 측정 ----
+const now = () => performance.now() / 1000 - t0;
+function onMotion(e) {
+  if (!running) return;
+  const L = e.acceleration, G = e.accelerationIncludingGravity, R = e.rotationRate || {};
+  const lin = L && L.x != null ? [L.x, L.y, L.z] : null;
+  const incG = G && G.x != null ? [G.x, G.y, G.z] : [0, 0, 0];
+  const rot = [R.beta, R.gamma, R.alpha];          // 단위: °/s (x, y, z 축 회전)
+  const t = now();
+  raw.motion.push([t, ...(lin || [null, null, null]), ...incG, ...rot]);
+  det.addMotion(t, lin, incG, rot);
+  hzCount++;
+}
+function onGps(p) {
+  if (!running) return;
+  const c = p.coords, t = now();
+  raw.gps.push([t, c.latitude, c.longitude, c.accuracy, c.speed]);
+  det.addGps(t, c.latitude, c.longitude, c.accuracy, c.speed);
+  lastGpsAcc = c.accuracy;
+}
+$("realBtn").onclick = async () => {
+  if (!window.isSecureContext) { alertMsg("HTTPS 주소에서 열어야 센서를 쓸 수 있어요."); return; }
+  try {
+    if (typeof DeviceMotionEvent !== "undefined" && typeof DeviceMotionEvent.requestPermission === "function") {
+      if (await DeviceMotionEvent.requestPermission() !== "granted") throw new Error("동작 센서 권한이 거부됐어요 (설정에서 다시 허용)");
+    }
+    if ("wakeLock" in navigator) { try { wakeLock = await navigator.wakeLock.request("screen"); } catch (_) {} }
+    t0 = performance.now() / 1000;
+    begin("real");
+    window.addEventListener("devicemotion", onMotion);
+    watchId = navigator.geolocation.watchPosition(onGps, (err) => $("liveMsg").innerHTML = `<span class="warn">GPS: ${err.message}</span>`,
+                                                  { enableHighAccuracy: true, maximumAge: 0 });
+    setTimeout(() => { if (running && mode === "real" && raw.motion.length === 0)
+      $("liveMsg").innerHTML = `<span class="warn">센서 데이터가 들어오지 않아요. 컴퓨터이거나 권한 문제예요. 폰에서 열어 주세요.</span>`; }, 2500);
+  } catch (err) { alertMsg("시작 실패: " + err.message); }
+};
+function alertMsg(text) {
+  let el = $("startMsg");
+  if (!el) { el = document.createElement("div"); el.id = "startMsg"; el.className = "card warn"; $("startView").prepend(el); }
+  el.textContent = text;
+}
+
+// ---- 시뮬레이션 ----
+$("simBtn").onclick = () => {
+  const sim = makeSimRide(60), speed = Number($("simSpeed").value);
+  begin("sim");
+  let simT = 0, mi = 0, gi = 0;
+  simTimer = setInterval(() => {
+    simT += 0.05 * speed;
+    while (mi < sim.motion.length && sim.motion[mi].t <= simT) {
+      const m = sim.motion[mi++];
+      raw.motion.push([m.t, ...m.lin, ...m.incG, ...m.rot]);
+      det.addMotion(m.t, m.lin, m.incG, m.rot); hzCount++;
+    }
+    while (gi < sim.gps.length && sim.gps[gi].t <= simT) {
+      const g = sim.gps[gi++];
+      raw.gps.push([g.t, g.lat, g.lon, g.acc, g.speed]);
+      det.addGps(g.t, g.lat, g.lon, g.acc, g.speed); lastGpsAcc = g.acc;
+    }
+    if (mi >= sim.motion.length) stop();
+  }, 50);
+};
+const curTime = () => raw.motion.length ? raw.motion[raw.motion.length - 1][0] : 0;
+
+// ---- 실시간 화면 갱신 ----
+function updateLive() {
+  if (!running) return;
+  const t = curTime();
+  $("sTime").textContent = t.toFixed(0);
+  if (t - hzLast >= 1) { hzValue = hzCount / (t - hzLast); hzCount = 0; hzLast = t; }
+  $("sHz").textContent = hzValue ? hzValue.toFixed(0) : "-";
+  $("sGps").textContent = lastGpsAcc == null ? "-" : lastGpsAcc.toFixed(0);
+  const s = det.stats;
+  $("sCand").textContent = s.candidates; $("sPass").textContent = s.pass1; $("sBump").textContent = s.bump;
+  $("sMinor").textContent = s.minor; $("sDanger").textContent = s.danger; $("sRemoved").textContent = s.removed;
+  $("liveMsg").innerHTML = !det.calibrated ? "⏳ 보정 중… 2초간 움직이지 마세요"
+    : (mode === "sim" ? `▶ 시뮬레이션 주행 중 · ${t.toFixed(0)}/72초 (끝나면 자동으로 결과 화면)` : "🛴 측정 중 · 화면 보지 말고 안전 운행하세요");
+  drawLive(t);
+  setTimeout(updateLive, 150);
+}
+function drawLive(t) {
+  const cv = $("livePlot"), g = cv.getContext("2d"), W = cv.width, H = cv.height;
+  g.clearRect(0, 0, W, H);
+  g.strokeStyle = "#333"; g.beginPath(); g.moveTo(0, H / 2); g.lineTo(W, H / 2); g.stroke();
+  const x = (tt) => (tt - (t - 5)) / 5 * W;
+  for (const ev of det.events) if (ev.t > t - 5) {           // 판정된 충격 위치 표시
+    g.strokeStyle = TYPE_INFO[ev.type].color; g.lineWidth = 2;
+    g.beginPath(); g.moveTo(x(ev.t), 0); g.lineTo(x(ev.t), H); g.stroke();
+  }
+  g.lineWidth = 1; g.strokeStyle = "#4fc3f7"; g.beginPath();
+  let first = true;
+  for (let i = 0; i < det.t.length; i++) {
+    if (det.t[i] < t - 5) continue;
+    const y = H / 2 - det.av[i] * 5;
+    first ? g.moveTo(x(det.t[i]), y) : g.lineTo(x(det.t[i]), y); first = false;
+  }
+  g.stroke();
+}
+
+// ---- 종료 ----
+function stop() {
+  if (!running) return;
+  running = false;
+  clearInterval(simTimer);
+  window.removeEventListener("devicemotion", onMotion);
+  if (watchId !== null) { navigator.geolocation.clearWatch(watchId); watchId = null; }
+  if (wakeLock) { wakeLock.release(); wakeLock = null; }
+  showResults();
+}
+$("stopBtn").onclick = stop;
+
+// ---- 결과: 지도 ----
+function showResults() {
+  show("resultView");
+  $("reportBox").classList.add("hidden"); $("detail").classList.add("hidden");
+  const shown = det.events.filter(e => ["danger", "minor", "bump"].includes(e.type));
+  const path = raw.gps.filter(g => g[1] != null).map(g => [g[1], g[2]]);
+  if (map) { map.remove(); map = null; }
+  markers = {};
+  if (typeof L === "undefined") {             // 인터넷이 없어 지도 라이브러리를 못 불러온 경우
+    drawOfflineMap(path, shown);
+    renderAsk(); renderEvents(); return;
+  }
+  const center = path.length ? path[path.length - 1] : [37.2965, 126.8340];
+  map = L.map("map").setView(center, 17);
+  L.tileLayer("https://tile.openstreetmap.org/{z}/{x}/{y}.png", { maxZoom: 19, attribution: "© OpenStreetMap" }).addTo(map);
+  if (path.length > 1) { const line = L.polyline(path, { color: "#90caf9", weight: 4 }).addTo(map); map.fitBounds(line.getBounds(), { padding: [30, 30] }); }
+  markers = {};
+  for (const ev of shown) {
+    if (ev.lat == null) continue;
+    const m = L.circleMarker([ev.lat, ev.lon], { radius: ev.type === "danger" ? 11 : 8, color: "#fff", weight: 2,
+                                                fillColor: TYPE_INFO[ev.type].color, fillOpacity: 0.95 }).addTo(map);
+    m.bindTooltip(`#${ev.id} ${TYPE_INFO[ev.type].name}`, { permanent: ev.type === "danger", direction: "top" });
+    m.on("click", () => selectEvent(ev.id));
+    markers[ev.id] = m;
+  }
+  setTimeout(() => map.invalidateSize(), 100);
+  renderAsk(); renderEvents();
+}
+
+// 지도 라이브러리를 못 불러올 때(미리보기·오프라인): 경로와 마커를 직접 그림
+function drawOfflineMap(path, shown) {
+  $("map").innerHTML = `<canvas id="offMap" width="700" height="440" style="height:100%"></canvas>`;
+  const cv = $("offMap"), g = cv.getContext("2d"), W = cv.width, H = cv.height, pad = 40;
+  g.fillStyle = "#1b2a1b"; g.fillRect(0, 0, W, H);
+  const pts = path.concat(shown.filter(e => e.lat != null).map(e => [e.lat, e.lon]));
+  if (!pts.length) { g.fillStyle = "#aaa"; g.font = "18px sans-serif"; g.fillText("GPS 기록이 없어요", 30, 40); return; }
+  const la = pts.map(p => p[0]), lo = pts.map(p => p[1]);
+  const lat0 = Math.min(...la), lat1 = Math.max(...la), lon0 = Math.min(...lo), lon1 = Math.max(...lo);
+  const kx = Math.cos(lat0 * Math.PI / 180);                       // 경도 1도 길이 보정
+  const span = Math.max((lon1 - lon0) * kx, lat1 - lat0, 1e-6);
+  const s = Math.min(W, H) - 2 * pad;
+  const P = (lat, lon) => [pad + (lon - lon0) * kx / span * s + (W - s - 2 * pad) / 2, H - pad - (lat - lat0) / span * s];
+  g.strokeStyle = "#90caf9"; g.lineWidth = 5; g.beginPath();
+  path.forEach((p, i) => { const [x, y] = P(p[0], p[1]); i ? g.lineTo(x, y) : g.moveTo(x, y); }); g.stroke();
+  for (const ev of shown) {
+    if (ev.lat == null) continue;
+    const [x, y] = P(ev.lat, ev.lon), r = ev.type === "danger" ? 13 : 10;
+    g.fillStyle = TYPE_INFO[ev.type].color; g.strokeStyle = "#fff"; g.lineWidth = 2;
+    g.beginPath(); g.arc(x, y, r, 0, 2 * Math.PI); g.fill(); g.stroke();
+    g.fillStyle = "#fff"; g.font = "bold 16px sans-serif"; g.fillText("#" + ev.id, x + r + 3, y + 5);
+  }
+  const m = 50 / (span * 111000) * s;                               // 50 m 축척 막대
+  g.strokeStyle = "#fff"; g.lineWidth = 3; g.beginPath(); g.moveTo(20, H - 18); g.lineTo(20 + m, H - 18); g.stroke();
+  g.fillStyle = "#fff"; g.font = "14px sans-serif"; g.fillText("50 m", 24, H - 24);
+  g.fillStyle = "#ccc"; g.fillText("간이 지도 (실제 지도는 인터넷 연결된 https 주소에서 표시)", 20, 24);
+}
+
+// ---- 결과: 3차 확인 메시지 ----
+function renderAsk() {
+  const list = det.events.filter(e => e.type === "danger");
+  const box = $("askList");
+  if (!list.length) { box.innerHTML = `<div class="card sub">위험 포트홀로 판정된 곳이 없어요.</div>`; return; }
+  box.innerHTML = "";
+  for (const ev of list) {
+    const div = document.createElement("div");
+    div.className = "card ask ev"; div.style.borderLeftColor = TYPE_INFO.danger.color;
+    const label = { yes: "예 → 신고 목록에 추가", no: "아니오 → 보류", unsure: "모르겠음 → 보류" };
+    div.innerHTML = `<b>#${ev.id}</b> · 출발 후 ${ev.t.toFixed(0)}초 지점<br>
+      지도의 빨간 <b>#${ev.id}</b> 근처에서 <b>큰 덜컹임</b>이 있었나요?
+      <div class="row"><button class="green" data-a="yes">예</button><button class="gray" data-a="no">아니오</button><button class="gray" data-a="unsure">모르겠음</button></div>
+      <div class="ansText ${ev.answer ? "answered" : ""}">${ev.answer ? label[ev.answer] : ""}</div>`;
+    div.querySelectorAll("button").forEach(b => b.onclick = () => {
+      ev.answer = b.dataset.a;
+      div.querySelector(".ansText").textContent = label[ev.answer];
+      div.querySelector(".ansText").className = "ansText answered";
+    });
+    div.onclick = (e) => { if (e.target.tagName !== "BUTTON") selectEvent(ev.id); };
+    box.appendChild(div);
+  }
+}
+
+// ---- 결과: 감지 기록 목록 + 판정 근거 ----
+function renderEvents() {
+  const box = $("evList"); box.innerHTML = "";
+  if (!det.events.length) { box.innerHTML = `<div class="card sub">충격 후보가 없었어요.</div>`; return; }
+  for (const ev of det.events) {
+    const info = TYPE_INFO[ev.type];
+    const div = document.createElement("div");
+    div.className = "card ev"; div.id = "ev" + ev.id; div.style.borderLeftColor = info.color;
+    div.innerHTML = `<span class="chip" style="background:${info.color}">${info.name}</span> #${ev.id} · ${ev.t.toFixed(1)}초
+                     <div class="checks">${ev.checks[ev.checks.length - 1]}</div>`;
+    div.onclick = () => selectEvent(ev.id);
+    box.appendChild(div);
+  }
+}
+function selectEvent(id) {
+  const ev = det.events.find(e => e.id === id);
+  document.querySelectorAll("#evList .ev").forEach(d => d.classList.toggle("sel", d.id === "ev" + id));
+  $("detail").classList.remove("hidden");
+  $("detailTitle").innerHTML = `<span class="chip" style="background:${TYPE_INFO[ev.type].color}">${TYPE_INFO[ev.type].name}</span> #${ev.id} 판정 근거`;
+  $("detailChecks").innerHTML = ev.checks.map(c => "· " + c).join("<br>");
+  drawSpectrum(ev); drawPitch(ev);
+  if (markers[id] && map) map.setView(markers[id].getLatLng(), 18);
+  $("detail").scrollIntoView({ behavior: "smooth", block: "nearest" });
+}
+function drawSpectrum(ev) {
+  const cv = $("specPlot"), g = cv.getContext("2d"), W = cv.width, H = cv.height, pad = 24;
+  g.clearRect(0, 0, W, H);
+  const { f, P } = ev.spec, fMax = f[f.length - 1], pMax = Math.max(...P) || 1;
+  const X = (v) => pad + v / fMax * (W - pad - 6), Y = (v) => H - pad - v / pMax * (H - pad - 8);
+  g.setLineDash([5, 4]); g.strokeStyle = "#888"; g.beginPath();
+  g.moveTo(X(det.cfg.impactBandHz), 4); g.lineTo(X(det.cfg.impactBandHz), H - pad); g.stroke(); g.setLineDash([]);
+  g.strokeStyle = TYPE_INFO[ev.type].color; g.lineWidth = 2; g.beginPath();
+  f.forEach((fv, k) => k ? g.lineTo(X(fv), Y(P[k])) : g.moveTo(X(fv), Y(P[k]))); g.stroke(); g.lineWidth = 1;
+  g.fillStyle = "#aaa"; g.font = "12px sans-serif";
+  for (let v = 0; v <= fMax; v += 5) g.fillText(v, X(v) - 4, H - 8);
+  g.fillText("Hz", W - 20, H - 8);
+}
+function drawPitch(ev) {
+  const cv = $("pitchPlot"), g = cv.getContext("2d"), W = cv.width, H = cv.height, pad = 24;
+  g.clearRect(0, 0, W, H);
+  if (!ev.pitchW) { g.fillStyle = "#aaa"; g.font = "14px sans-serif"; g.fillText("1차에서 탈락해 자이로 분석을 하지 않았어요", 20, H / 2); return; }
+  const t = ev.tW, lim = Math.max(det.cfg.minPitchRate * 1.5, ...ev.pitchW.map(Math.abs));
+  const X = (v) => pad + (v - t[0]) / (t[t.length - 1] - t[0]) * (W - pad - 6), Y = (v) => H / 2 - v / lim * (H / 2 - 10);
+  g.strokeStyle = "#333"; g.beginPath(); g.moveTo(pad, H / 2); g.lineTo(W, H / 2); g.stroke();
+  g.setLineDash([4, 4]); g.strokeStyle = "#666";
+  for (const s of [1, -1]) { g.beginPath(); g.moveTo(pad, Y(s * det.cfg.minPitchRate)); g.lineTo(W, Y(s * det.cfg.minPitchRate)); g.stroke(); }
+  g.setLineDash([]); g.strokeStyle = "#ce93d8"; g.lineWidth = 2; g.beginPath();
+  ev.pitchW.forEach((v, i) => i ? g.lineTo(X(t[i]), Y(v)) : g.moveTo(X(t[i]), Y(v))); g.stroke(); g.lineWidth = 1;
+  g.fillStyle = "#aaa"; g.font = "12px sans-serif"; g.fillText("+ 들림", 2, 14); g.fillText("− 숙임", 2, H - 6);
+}
+
+// ---- 신고서 ----
+function reportItems() { return det.events.filter(e => e.type === "danger" && e.answer === "yes"); }
+$("reportBtn").onclick = () => {
+  const items = reportItems(), held = det.events.filter(e => e.type === "danger" && e.answer !== "yes").length;
+  const minor = det.events.filter(e => e.type === "minor").length;
+  const d = new Date();
+  let txt = `[노면 위험(포트홀) 신고서]\n작성: ${d.toLocaleString("ko-KR")}\n감지 방식: 공유 킥보드 거치 스마트폰 진동 분석 (1차 FFT · 2차 자이로 · 심각도 · 이용자 확인)\n\n`;
+  if (!items.length) txt += "이용자가 '예'로 확인한 위험 포트홀이 없어요.\n";
+  items.forEach((ev, i) => {
+    txt += `${i + 1}) 위치: ${ev.lat?.toFixed(6)}, ${ev.lon?.toFixed(6)}\n` +
+           `   지도: https://www.openstreetmap.org/?mlat=${ev.lat?.toFixed(6)}&mlon=${ev.lon?.toFixed(6)}#map=19/${ev.lat?.toFixed(6)}/${ev.lon?.toFixed(6)}\n` +
+           `   판정 근거: FFT 피크 ${ev.peakHz.toFixed(1)} Hz, 배경 대비 ${ev.contrast.toFixed(1)}배, 자이로 ${ev.pitchOrder}, ` +
+           `최대 충격 ${ev.peakAcc.toFixed(1)} m/s²${ev.echoDt ? `, 앞뒤 바퀴 Δt ${ev.echoDt.toFixed(2)} s` : ""}\n` +
+           `   이용자 확인: 예\n\n`;
+  });
+  txt += `참고: 확인 보류 ${held}건, 경미 포트홀(관찰 목록) ${minor}건\n※ 위치는 GPS 기준으로 수 m 오차가 있을 수 있어요. 현장 확인 후 보수 바랍니다.`;
+  $("reportText").value = txt;
+  $("reportBox").classList.remove("hidden");
+};
+$("copyBtn").onclick = async () => {
+  try { await navigator.clipboard.writeText($("reportText").value); $("copyBtn").textContent = "복사됨 ✓"; }
+  catch (_) { $("reportText").select(); document.execCommand("copy"); $("copyBtn").textContent = "복사됨 ✓"; }
+  setTimeout(() => $("copyBtn").textContent = "복사", 1500);
+};
+function download(name, header, rows) {
+  const text = "﻿" + header + "\n" + rows.map(r => r.map(v => (v == null ? "" : v)).join(",")).join("\n");
+  const a = document.createElement("a");
+  a.href = URL.createObjectURL(new Blob([text], { type: "text/csv" })); a.download = name; a.click();
+}
+const stamp = () => new Date().toISOString().slice(5, 16).replace(/[-T:]/g, "");
+$("csvBtn").onclick = () => download(`신고목록_${stamp()}.csv`, "번호,위도,경도,FFT피크(Hz),배경대비,자이로순서,최대충격(m/s2),이중충격dt(s),이용자확인",
+  reportItems().map(e => [e.id, e.lat, e.lon, e.peakHz.toFixed(1), e.contrast.toFixed(1), e.pitchOrder, e.peakAcc.toFixed(2), e.echoDt?.toFixed(2), "예"]));
+$("rawBtn").onclick = () => {
+  download(`motion_${stamp()}.csv`, "Time (s),lin x,lin y,lin z,accG x,accG y,accG z,gyro x (deg/s),gyro y (deg/s),gyro z (deg/s)", raw.motion);
+  setTimeout(() => download(`gps_${stamp()}.csv`, "Time (s),Latitude,Longitude,Accuracy (m),Speed (m/s)", raw.gps), 500);
+};
+$("sendBtn").onclick = () => {
+  const n = reportItems().length, box = $("sendResult");
+  box.classList.remove("hidden");
+  if (!n) { box.innerHTML = `<span class="warn">신고할 지점이 없어요. 3차 확인에서 '예'를 누른 위험 포트홀만 신고돼요.</span>`; return; }
+  const d = new Date(), no = `PM-${d.toISOString().slice(0, 10).replace(/-/g, "")}-${String(Math.floor(Math.random() * 9000) + 1000)}`;
+  box.innerHTML = `<b style="color:#9ccc65">✅ 신고 접수 완료 (시연)</b><br>접수번호 ${no} · 위험 포트홀 ${n}건<br><br>
+    처리 흐름(시나리오): 접수 → 담당 부서 배정 → AI 카메라 차량 현장 확인 → 보수<br><br>
+    <span class="sub">※ 발표 시연용 화면이에요. 실제로 어떤 기관에도 전송되지 않아요.</span>`;
+};
+$("againBtn").onclick = () => show("startView");
+</script>
+</body>
+</html>
